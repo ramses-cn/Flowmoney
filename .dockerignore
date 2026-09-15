@@ -1,0 +1,15 @@
+node_modules
+dist
+build
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.data
+*.log
+.DS_Store
+README.md
+DEPLOYMENT_CHECKLIST.md
+agent-ctx

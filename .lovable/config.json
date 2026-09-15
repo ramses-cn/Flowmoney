@@ -1,0 +1,65 @@
+{
+  "project": {
+    "name": "FlowMoney",
+    "description": "Centro financiero personal y grupal con escaneo AI de tickets, gestión de grupos, simplificación de deudas y reportes programados. Design system Apple iOS 17.",
+    "version": "1.0.0",
+    "type": "web-app",
+    "framework": "react",
+    "language": "typescript"
+  },
+  "build": {
+    "commands": {
+      "install": "npm install",
+      "dev": "npm run dev",
+      "build": "npm run build",
+      "test": "npm test",
+      "lint": "npm run lint"
+    },
+    "outputDir": "dist",
+    "nodeVersion": "20"
+  },
+  "environment": {
+    "required": [
+      "GEMINI_API_KEY",
+      "FIREBASE_PROJECT_ID"
+    ],
+    "optional": [
+      "INSTANCE_CONNECTION_NAME",
+      "DB_USER",
+      "DB_PASS",
+      "DB_NAME",
+      "CORS_ALLOWED_ORIGINS",
+      "SMTP_HOST",
+      "SMTP_PORT",
+      "SMTP_USER",
+      "SMTP_PASS",
+      "SMTP_FROM",
+      "GEMINI_MODEL",
+      "ALLOW_DEMO_AUTH",
+      "MASTER_ADMIN_EMAILS"
+    ]
+  },
+  "features": [
+    "Gestión de gastos personales, de pareja y grupales",
+    "Escaneo de tickets con Gemini AI (multimodal OCR)",
+    "Simplificación de deudas greedy entre miembros",
+    "Reportes PDF programados con envío por email SMTP",
+    "Alertas de presupuesto inteligentes",
+    "Sincronización en tiempo real vía Firestore",
+    "Design system Apple iOS 17 (SF Pro, system colors, glassmorphism)"
+  ],
+  "integrations": {
+    "gemini_ai": {
+      "required": true,
+      "description": "OCR multimodal de tickets de compra"
+    },
+    "firebase": {
+      "required": true,
+      "services": ["auth", "firestore"]
+    },
+    "cloud_sql": {
+      "required": false,
+      "description": "PostgreSQL para persistencia (opcional: emulador en memoria para dev)"
+    }
+  }
+}

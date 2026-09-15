@@ -1,0 +1,24 @@
+{
+  "name": "FlowMoney",
+  "description": "FlowMoney: Centro financiero personal y grupal con escaneo inteligente de tickets mediante Gemini AI, simplificación de deudas estilo Splitwise, reportes programados y dashboard con alertas inteligentes. Design system Apple iOS 17 con SF Pro typography, glassmorphism y colores system.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ],
+  "categories": [
+    "productivity",
+    "finance",
+    "ai-powered"
+  ],
+  "tags": [
+    "react",
+    "typescript",
+    "tailwindcss",
+    "express",
+    "firebase",
+    "cloud-sql",
+    "gemini-ai",
+    "apple-design",
+    "ios"
+  ]
+}

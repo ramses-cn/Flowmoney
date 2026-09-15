@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Regla global por defecto: denegar todo acceso no especificado
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // Regla para eventos de sincronización en tiempo real (Fase 5)
+    // ============================================================
+    // Corregido (F7): la regla original permitía que cualquier usuario
+    // autenticado leyera TODOS los eventos, incluyendo los de grupos a
+    // los que no pertenece. Ahora se filtra por group_id.
+    //
+    // Lógica:
+    // 1. El usuario debe estar autenticado.
+    // 2. El evento debe tener un campo `group_id`.
+    // 3. El usuario debe ser miembro activo del grupo en public.group_members.
+    //
+    // Como Firestore Rules no puede consultar PostgreSQL directamente,
+    // usamos una función helper que requiere get() en una colección
+    // auxiliar `group_membership_index` que el backend debe mantener
+    // actualizada (snapshot de group_members).
+    //
+    // Alternativa más simple: restringir eventos a aquellos cuyo
+    // `actor_uid` coincide con el usuario O el usuario está listado
+    // explícitamente en `event.visible_to` (array de UIDs).
+    // El backend debe popular `visible_to` al emitir el evento.
+    // ============================================================
+    match /events/{eventId} {
+      allow read: if request.auth != null
+        && (
+          // El usuario es el actor del evento
+          resource.data.actor_uid == request.auth.uid
+          // O está en la lista visible_to (miembro del grupo)
+          || request.auth.uid in resource.data.visible_to
+          // O el evento es global (sin group_id, ej. system_announcement)
+          || !('group_id' in resource.data)
+        );
+      allow write: if false; // Sólo Admin SDK puede escribir
+    }
+  }
+}

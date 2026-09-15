@@ -1,0 +1,67 @@
+# ============================================================
+# FlowMoney — Cloud Build configuration para deploy a Cloud Run
+# ============================================================
+# Uso:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_SERVICE_NAME=flowmoney
+#
+# Requiere que Cloud Build tenga permisos para:
+#   - Cloud Run Admin
+#   - IAM Service Account User
+#   - Artifact Registry Writer
+# ============================================================
+
+substitutions:
+  _REGION: 'us-central1'
+  _SERVICE_NAME: 'flowmoney'
+  _MEMORY: '1Gi'
+  _CPU: '1'
+  _MIN_INSTANCES: '0'
+  _MAX_INSTANCES: '10'
+  _TIMEOUT: '60s'
+
+steps:
+  # 1. Build de la imagen Docker usando Buildpacks o Docker build
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$SHORT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
+      - '.'
+
+  # 2. Push al Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$SHORT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest']
+
+  # 3. Deploy a Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image=gcr.io/$PROJECT_ID/$_SERVICE_NAME:$SHORT_SHA'
+      - '--region=$_REGION'
+      - '--memory=$_MEMORY'
+      - '--cpu=$_CPU'
+      - '--min-instances=$_MIN_INSTANCES'
+      - '--max-instances=$_MAX_INSTANCES'
+      - '--timeout=$_TIMEOUT'
+      - '--allow-unauthenticated'
+      - '--set-env-vars=NODE_ENV=production,ALLOW_DEMO_AUTH=false,GEMINI_MODEL=gemini-2.5-flash'
+      - '--update-secrets=GEMINI_API_KEY=gemini-api-key:latest,DB_PASS=flowmoney-db-pass:latest,SMTP_USER=smtp-user:latest,SMTP_PASS=smtp-pass:latest'
+      - '--set-cloudsql-instances=$PROJECT_ID:$_REGION:flowmoney-db'
+
+images:
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/$_SERVICE_NAME:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+  dynamicSubstitutions: true

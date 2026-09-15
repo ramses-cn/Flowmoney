@@ -1,0 +1,23 @@
+{
+  "entities": {
+    "RealtimeEvent": {
+      "title": "RealtimeEvent",
+      "description": "Lightweight signaling event for real-time notifications in FlowMoney",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["expense_created", "settlement_created", "members_changed", "group_updated"] },
+        "group_id": { "type": "string" },
+        "actor_uid": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "group_id", "actor_uid", "created_at"]
+    }
+  },
+  "firestore": {
+    "/events/{eventId}": {
+      "schema": "RealtimeEvent",
+      "description": "Realtime signaling notification events for authenticated clients (read-only)"
+    }
+  }
+}
