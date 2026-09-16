@@ -11,6 +11,9 @@ export interface Profile {
   avatar_url?: string | null;
   default_currency: string;
   theme: 'light' | 'dark' | 'system';
+  is_suspended?: boolean;
+  suspended_reason?: string | null;
+  access_expires_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -53,6 +56,7 @@ export interface Group {
   type: GroupType;
   currency: string;
   cover_url?: string | null;
+  icon?: string;
   auto_archive_days?: number;
   is_archived?: boolean;
   created_by: string;
@@ -60,6 +64,7 @@ export interface Group {
   updated_at: string;
   user_role?: 'admin' | 'member';
   members_count?: number;
+  member_count?: number;
   net_balance?: number;
   last_expense?: {
     id: string;
@@ -114,9 +119,12 @@ export interface SimplifiedDebt {
   creditor_avatar?: string | null;
   amount: number;
   currency: string;
+  from_name?: string;
+  to_name?: string;
 }
 
 export type ExpenseLens = 'personal' | 'couple' | 'group';
+export type LensType = ExpenseLens;
 
 export interface Expense {
   id: string;
@@ -270,6 +278,8 @@ export type DashboardPeriod =
   | 'last_90_days'
   | 'custom';
 
+export type PeriodType = DashboardPeriod;
+
 export type DashboardWidgetId =
   | 'balance'
   | 'income'
@@ -302,6 +312,8 @@ export interface DynamicFilters {
   personId?: string;
   groupId?: string;
   budgetStatus?: 'all' | 'within' | 'exceeded';
+  minAmount?: number;
+  maxAmount?: number;
 }
 
 // ==============================================================================

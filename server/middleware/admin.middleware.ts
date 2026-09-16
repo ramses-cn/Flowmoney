@@ -9,10 +9,14 @@ import { query } from '../db/cloudsql.ts';
 
 /**
  * Lista de emails autorizados como Master Admin.
- * Por defecto incluye el correo del propietario de la app (Psico.Csar@gmail.com)
- * y cualquier lista blanca adicional configurada en variables de entorno del servidor.
+ * Autorizados exclusivamente:
+ * - psico.csar@gmail.com
+ * - cesar.nieto.ore@gmail.com
  */
-const DEFAULT_MASTER_ADMINS = ['psico.csar@gmail.com'];
+const DEFAULT_MASTER_ADMINS = [
+  'psico.csar@gmail.com',
+  'cesar.nieto.ore@gmail.com',
+];
 
 export function isMasterAdmin(user?: { uid: string; email?: string; [key: string]: any }): boolean {
   if (!user) return false;

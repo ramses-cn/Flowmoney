@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import { requireFirebaseAuth, AuthenticatedRequest } from '../middleware/auth.middleware.ts';
+import { isMasterAdmin } from '../middleware/admin.middleware.ts';
 import { query } from '../db/cloudsql.ts';
 import { emitRealtimeEvent } from '../lib/realtime-events.ts';
 import { auditUserAction } from '../middleware/audit.middleware.ts';  // F13
@@ -42,13 +43,23 @@ router.post('/', auditUserAction('settlement_recorded', 'settlement'), async (re
     }
 
     // Verificar que el usuario pertenece al grupo
-    const membershipCheck = await query(
+    let membershipCheck = await query(
       'SELECT role FROM public.group_members WHERE group_id = $1 AND user_id = $2',
       [group_id, uid]
     );
 
     if (membershipCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'No perteneces a este grupo' });
+      if (isMasterAdmin(req.user)) {
+        membershipCheck = { rows: [{ role: 'admin' }], rowCount: 1 };
+      } else {
+        const grpRes = await query('SELECT created_by FROM public.groups WHERE id = $1', [group_id]);
+        if (grpRes.rows.length > 0 && grpRes.rows[0].created_by === uid) {
+          await query('INSERT INTO public.group_members (group_id, user_id, role) VALUES ($1, $2, $3)', [group_id, uid, 'admin']);
+          membershipCheck = { rows: [{ role: 'admin' }], rowCount: 1 };
+        } else {
+          return res.status(403).json({ error: 'No perteneces a este grupo' });
+        }
+      }
     }
 
     const callerRole = membershipCheck.rows[0]?.role;
@@ -151,13 +162,23 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({ error: 'El parámetro group_id es requerido' });
     }
 
-    const membershipCheck = await query(
+    let membershipCheck = await query(
       'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
       [groupId, uid]
     );
 
     if (membershipCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'No perteneces a este grupo' });
+      if (isMasterAdmin(req.user)) {
+        membershipCheck = { rows: [{ role: 'admin' }], rowCount: 1 };
+      } else {
+        const grpRes = await query('SELECT created_by FROM public.groups WHERE id = $1', [groupId]);
+        if (grpRes.rows.length > 0 && grpRes.rows[0].created_by === uid) {
+          await query('INSERT INTO public.group_members (group_id, user_id, role) VALUES ($1, $2, $3)', [groupId, uid, 'admin']);
+          membershipCheck = { rows: [{ role: 'admin' }], rowCount: 1 };
+        } else {
+          return res.status(403).json({ error: 'No perteneces a este grupo' });
+        }
+      }
     }
 
     const sql = `

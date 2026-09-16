@@ -76,10 +76,35 @@ export function loadStoreFromDisk(): void {
             if (v.is_custom === undefined) v.is_custom = false;
             if (v.sort_order === undefined) v.sort_order = 99;
           }
+          if (key === 'profiles' && v) {
+            if (v.is_suspended === undefined) v.is_suspended = false;
+            if (v.suspended_reason === undefined) v.suspended_reason = null;
+            if (v.access_expires_at === undefined) v.access_expires_at = null;
+          }
           targetMap.set(k, v);
         }
       }
     }
+
+    // Auto-sanar cualquier grupo existente sin membresía de su creador
+    for (const [gid, g] of memoryStore.groups.entries()) {
+      if (g.created_by) {
+        const hasMem = Array.from(memoryStore.group_members.values()).some(
+          (gm) => gm.group_id === gid && gm.user_id === g.created_by
+        );
+        if (!hasMem) {
+          const newGmId = 'gm_' + Math.random().toString(36).substr(2, 9);
+          memoryStore.group_members.set(newGmId, {
+            id: newGmId,
+            group_id: gid,
+            user_id: g.created_by,
+            role: 'admin',
+            joined_at: g.created_at || new Date().toISOString(),
+          });
+        }
+      }
+    }
+
     console.log(
       `[Storage] Almacén persistente cargado con éxito: ${memoryStore.profiles.size} usuarios, ${memoryStore.groups.size} grupos, ${memoryStore.expenses.size} gastos.`
     );
@@ -238,6 +263,19 @@ function runMemoryQuery(text: string, params: any[]): { rows: any[]; rowCount: n
 
   // 2.1 UPDATE profiles
   if (normalized.includes('update') && normalized.includes('profiles')) {
+    if (normalized.includes('is_suspended') || normalized.includes('access_expires_at')) {
+      const [is_suspended, suspended_reason, access_expires_at, uid] = params;
+      const existing = memoryStore.profiles.get(uid);
+      if (existing) {
+        existing.is_suspended = !!is_suspended;
+        existing.suspended_reason = suspended_reason !== undefined ? suspended_reason : existing.suspended_reason;
+        existing.access_expires_at = access_expires_at !== undefined ? access_expires_at : existing.access_expires_at;
+        existing.updated_at = new Date().toISOString();
+        memoryStore.profiles.set(uid, existing);
+        return { rows: [existing], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
     const [newName, newAvatar, newCurrency, newTheme, uid] = params;
     const existing = memoryStore.profiles.get(uid);
     if (existing) {
@@ -373,11 +411,25 @@ function runMemoryQuery(text: string, params: any[]): { rows: any[]; rowCount: n
     return { rows: [], rowCount: 0 };
   }
 
-  // 4. SELECT accounts by user_id
+  // 4. SELECT accounts
   if (normalized.includes('select') && isFromTable(normalized, 'accounts')) {
-    const uid = params[0];
-    const rows = Array.from(memoryStore.accounts.values()).filter((a) => a.user_id === uid && !a.is_archived);
-    return { rows, rowCount: rows.length };
+    if (normalized.includes('where id =') || normalized.includes('where id=$1')) {
+      const accId = params[0];
+      const uid = params[1];
+      const acc = memoryStore.accounts.get(accId);
+      if (acc && (!uid || acc.user_id === uid)) {
+        return { rows: [acc], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+    if (params.length > 0 && params[0]) {
+      const uid = params[0];
+      const rows = Array.from(memoryStore.accounts.values()).filter((a) => a.user_id === uid && !a.is_archived);
+      return { rows, rowCount: rows.length };
+    }
+    // Si no hay parámetros (ej. admin o listado global), retornar todas las cuentas activas
+    const allRows = Array.from(memoryStore.accounts.values()).filter((a) => !a.is_archived);
+    return { rows: allRows, rowCount: allRows.length };
   }
 
   // 4.1 INSERT INTO accounts
@@ -638,13 +690,27 @@ function runMemoryQuery(text: string, params: any[]): { rows: any[]; rowCount: n
       is_settled: false,
     };
     const colMatch = normalized.match(/insert into public\.expense_shares\s*\(([^)]+)\)/i);
+    const valMatch = normalized.match(/values\s*\(([^)]+)\)/i);
+    const valTokens = valMatch ? valMatch[1].split(',').map((v) => v.trim()) : [];
     if (colMatch) {
       const cols = colMatch[1].split(',').map((c) => c.trim().toLowerCase());
+      let paramIdx = 0;
       cols.forEach((col, idx) => {
-        if (params[idx] !== undefined) {
-          if (col === 'owed_amount' || col === 'percentage') (share as any)[col] = Number(params[idx]);
-          else if (col === 'is_settled') (share as any)[col] = Boolean(params[idx]);
-          else (share as any)[col] = params[idx];
+        const rawToken = valTokens[idx];
+        let val: any = undefined;
+        if (rawToken && rawToken.startsWith('$')) {
+          val = params[paramIdx++];
+        } else if (rawToken) {
+          const num = Number(rawToken);
+          val = !isNaN(num) ? num : rawToken.replace(/^['"]|['"]$/g, '');
+        } else if (params[idx] !== undefined) {
+          val = params[idx];
+        }
+
+        if (val !== undefined) {
+          if (col === 'owed_amount' || col === 'percentage') (share as any)[col] = Number(val);
+          else if (col === 'is_settled') (share as any)[col] = Boolean(val);
+          else (share as any)[col] = val;
         }
       });
     } else {
@@ -746,6 +812,25 @@ function runMemoryQuery(text: string, params: any[]): { rows: any[]; rowCount: n
     const userMemberships = Array.from(memoryStore.group_members.values()).filter((gm) => gm.user_id === uid);
     const groupIds = new Set(userMemberships.map((gm) => gm.group_id));
 
+    // Incluir de forma garantizada los grupos creados por este usuario
+    for (const g of memoryStore.groups.values()) {
+      if (g.created_by === uid) {
+        groupIds.add(g.id);
+        if (!userMemberships.some((gm) => gm.group_id === g.id)) {
+          const gmId = 'gm_' + Math.random().toString(36).substr(2, 9);
+          const gm = {
+            id: gmId,
+            group_id: g.id,
+            user_id: uid,
+            role: 'admin',
+            joined_at: g.created_at || new Date().toISOString(),
+          };
+          memoryStore.group_members.set(gmId, gm);
+          userMemberships.push(gm);
+        }
+      }
+    }
+
     let groups = Array.from(memoryStore.groups.values()).filter((g) => groupIds.has(g.id));
 
     if (normalized.includes("type = 'couple'")) {
@@ -816,6 +901,18 @@ function runMemoryQuery(text: string, params: any[]): { rows: any[]; rowCount: n
       updated_at: new Date().toISOString(),
     };
     memoryStore.groups.set(id, grp);
+    // Asegurar inmediatamente que el creador quede registrado como admin en group_members
+    if (createdBy) {
+      const gmId = 'gm_' + Math.random().toString(36).substr(2, 9);
+      memoryStore.group_members.set(gmId, {
+        id: gmId,
+        group_id: id,
+        user_id: createdBy,
+        role: 'admin',
+        joined_at: new Date().toISOString(),
+      });
+    }
+    scheduleSaveStore();
     return { rows: [grp], rowCount: 1 };
   }
 
@@ -944,20 +1041,99 @@ function runMemoryQuery(text: string, params: any[]): { rows: any[]; rowCount: n
     return { rows: balances, rowCount: balances.length };
   }
 
-  // 11. SELECT group_members
+  // 11. GROUP MEMBERS (INSERT, DELETE, SELECT)
   if (normalized.includes('group_members')) {
+    if (normalized.includes('insert into') && normalized.includes('group_members')) {
+      const [groupId, userId, role] = params;
+      const roleVal = (role && typeof role === 'string' && role.trim()) ? role.trim() : (normalized.includes('admin') ? 'admin' : 'member');
+      // Verificar si ya existe membresía para evitar duplicados
+      const existing = Array.from(memoryStore.group_members.values()).find(
+        (gm) => gm.group_id === groupId && gm.user_id === userId
+      );
+      if (existing) {
+        if (roleVal) existing.role = roleVal;
+        scheduleSaveStore();
+        return { rows: [existing], rowCount: 1 };
+      }
+      const id = 'gm_' + Math.random().toString(36).substr(2, 9);
+      const gm = {
+        id,
+        group_id: groupId,
+        user_id: userId,
+        role: roleVal,
+        joined_at: new Date().toISOString(),
+      };
+      memoryStore.group_members.set(id, gm);
+      scheduleSaveStore();
+      return { rows: [gm], rowCount: 1 };
+    }
+
     if (normalized.includes('delete from') && normalized.includes('group_members')) {
       const [groupId, userId] = params;
       for (const [key, gm] of memoryStore.group_members.entries()) {
         if (gm.group_id === groupId && gm.user_id === userId) {
           memoryStore.group_members.delete(key);
+          scheduleSaveStore();
           return { rows: [], rowCount: 1 };
         }
       }
       return { rows: [], rowCount: 0 };
     }
 
+    // Consulta específica de verificación: WHERE group_id = $1 AND user_id = $2
+    if ((normalized.includes('user_id = $2') || normalized.includes('user_id =')) && params.length >= 2) {
+      const [groupId, userId] = params;
+      let match = Array.from(memoryStore.group_members.values()).filter(
+        (gm) => gm.group_id === groupId && gm.user_id === userId
+      );
+      // Si no existe pero el usuario es el creador del grupo, asegurar membresía admin al vuelo
+      if (match.length === 0) {
+        const grp = memoryStore.groups.get(groupId);
+        if (grp && grp.created_by === userId) {
+          const gmId = 'gm_' + Math.random().toString(36).substr(2, 9);
+          const gm = {
+            id: gmId,
+            group_id: groupId,
+            user_id: userId,
+            role: 'admin',
+            joined_at: grp.created_at || new Date().toISOString(),
+          };
+          memoryStore.group_members.set(gmId, gm);
+          scheduleSaveStore();
+          match = [gm];
+        }
+      }
+      return {
+        rows: match.map((gm) => ({
+          membership_id: gm.id,
+          role: gm.role,
+          joined_at: gm.joined_at,
+          user_id: gm.user_id,
+          group_id: gm.group_id,
+        })),
+        rowCount: match.length,
+      };
+    }
+
     const groupId = params[0];
+    const grp = memoryStore.groups.get(groupId);
+    if (grp?.created_by) {
+      const hasCreator = Array.from(memoryStore.group_members.values()).some(
+        (gm) => gm.group_id === groupId && gm.user_id === grp.created_by
+      );
+      if (!hasCreator) {
+        const gmId = 'gm_' + Math.random().toString(36).substr(2, 9);
+        memoryStore.group_members.set(gmId, {
+          id: gmId,
+          group_id: groupId,
+          user_id: grp.created_by,
+          role: 'admin',
+          joined_at: grp.created_at || new Date().toISOString(),
+        });
+        scheduleSaveStore();
+      }
+    }
+
     const members = Array.from(memoryStore.group_members.values())
       .filter((gm) => gm.group_id === groupId)
       .map((gm) => {
@@ -1910,7 +2086,7 @@ export async function upsertUserProfile(data: {
  * - Grupos con co-miembros: se remueve al usuario y se reasigna la administración/autoría si correspondía.
  * - Categorías, cuentas, suscripciones, gastos personales y perfil.
  */
-export async function deleteUserProfile(userId: string): Promise<{
+export async function deleteUserProfile(userId: string, force: boolean = false): Promise<{
   success: boolean;
   message: string;
   groupsWithBalance?: Array<{ id: string; name: string; balance: number }>;
@@ -1950,7 +2126,7 @@ export async function deleteUserProfile(userId: string): Promise<{
         }
       }
 
-      if (groupsWithBalance.length > 0) {
+      if (!force && groupsWithBalance.length > 0) {
         return {
           success: false,
           message:
@@ -2085,7 +2261,7 @@ export async function deleteUserProfile(userId: string): Promise<{
     }
   }
 
-  if (memoryGroupsWithBalance.length > 0) {
+  if (!force && memoryGroupsWithBalance.length > 0) {
     return {
       success: false,
       message:

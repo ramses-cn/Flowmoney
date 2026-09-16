@@ -1,9 +1,12 @@
 {
   "projectId": "symbolic-melody-kw532",
-  "appId": "1:000000000000:web:0000000000000000000000",
-  "apiKey": "AIzaSyXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  "appId": "1:328680170703:web:e8793036acacdd9ea403ba",
+  "apiKey": "AIzaSyBR1HpVznG-3MO2aOufIVHhNnI5YCEyrK0",
   "authDomain": "symbolic-melody-kw532.firebaseapp.com",
-  "storageBucket": "symbolic-melody-kw532.appspot.com",
-  "messagingSenderId": "000000000000",
-  "firestoreDatabaseId": "(default)"
+  "firestoreDatabaseId": "ai-studio-flowmoney-dacf7bbd-7c15-4adf-8181-9fb4b44adce0",
+  "storageBucket": "symbolic-melody-kw532.firebasestorage.app",
+  "messagingSenderId": "328680170703",
+  "measurementId": "",
+  "oAuthClientId": "328680170703-3u9ctatjiu9s0dvchrp4v994eh06cbk6.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

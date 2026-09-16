@@ -28,6 +28,9 @@ import adminRoutes from './server/routes/admin.routes.ts';
 
 const app = express();
 
+// Enable trust proxy for Cloud Run and reverse proxy environments (AI Studio)
+app.set('trust proxy', 1);
+
 // PORT obligatorio 3000 para el reverse proxy de AI Studio
 const PORT = 3000;
 
@@ -66,6 +69,7 @@ const globalLimiter = rateLimit({
   max: 200, // 200 req/min por IP (suficiente para uso normal, bloquea DoS básico)
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: {
     error: 'Demasiadas peticiones',
     message: 'Has excedido el límite de 200 peticiones por minuto. Reintenta en unos segundos.',
@@ -80,6 +84,7 @@ const authLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: { error: 'Demasiados intentos de autenticación. Reintenta en 1 minuto.' },
 });
 app.use('/api/auth/', authLimiter);
@@ -109,6 +114,14 @@ app.use('/api/categories', categoriesRoutes);
 app.use('/api/alerts', alertsRoutes);
 app.use('/api/reports', alertsRoutes);
 app.use('/api/admin', adminRoutes);
+
+// Endpoint 404 explícito para rutas de API — evita que Vite devuelva index.html (HTML) ante rutas API inválidas o inexistentes
+app.all(['/api', '/api/*', '/expenses', '/expenses/*'], (req, res) => {
+  return res.status(404).json({
+    error: 'Ruta no encontrada',
+    message: `El endpoint ${req.method} ${req.originalUrl} no existe en la API de FlowMoney`,
+  });
+});
 
 // Corregido (F5): Middleware global de manejo de errores
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

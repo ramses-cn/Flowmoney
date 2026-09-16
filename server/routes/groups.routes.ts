@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import { requireFirebaseAuth, AuthenticatedRequest } from '../middleware/auth.middleware.ts';
+import { isMasterAdmin } from '../middleware/admin.middleware.ts';
 import { query } from '../db/cloudsql.ts';
 import { simplifyFromBalances } from '../debts.ts';
 import { emitRealtimeEvent } from '../lib/realtime-events.ts';
@@ -8,6 +9,35 @@ import { logAdminAction } from '../middleware/admin.middleware.ts';
 const router = Router();
 
 router.use(requireFirebaseAuth);
+
+/**
+ * Valida o asigna acceso al grupo de manera no limitante:
+ * Si es Master Admin, o ya es miembro, o es el creador del grupo, asegura acceso sin bloquear.
+ */
+async function checkOrGrantGroupAccess(groupId: string, user: any): Promise<boolean> {
+  if (isMasterAdmin(user)) return true;
+  const uid = user.uid;
+  try {
+    const memberCheck = await query(
+      'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
+      [groupId, uid]
+    );
+    if (memberCheck.rows.length > 0) return true;
+
+    // Si el usuario es el creador del grupo, asegurar su membresía
+    const grpRes = await query('SELECT created_by FROM public.groups WHERE id = $1', [groupId]);
+    if (grpRes.rows.length > 0 && grpRes.rows[0].created_by === uid) {
+      await query(
+        'INSERT INTO public.group_members (group_id, user_id, role) VALUES ($1, $2, $3)',
+        [groupId, uid, 'admin']
+      );
+      return true;
+    }
+  } catch (err) {
+    console.warn('[checkOrGrantGroupAccess] Warning:', err);
+  }
+  return false;
+}
 
 /**
  * GET /api/groups
@@ -24,8 +54,8 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
     const sql = `
       SELECT
         g.*,
-        gm.role as user_role,
-        COALESCE(mc.members_count, 0) as members_count,
+        COALESCE(gm.role, 'admin') as user_role,
+        COALESCE(mc.members_count, 1) as members_count,
         COALESCE(ub.net_balance, 0) as net_balance,
         le.id as last_expense_id,
         le.description as last_expense_description,
@@ -33,7 +63,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
         le.currency as last_expense_currency,
         le.expense_date as last_expense_date
       FROM public.groups g
-      JOIN public.group_members gm ON gm.group_id = g.id
+      LEFT JOIN public.group_members gm ON gm.group_id = g.id AND gm.user_id = $2
       LEFT JOIN LATERAL (
         SELECT COUNT(*) as members_count
         FROM public.group_members
@@ -71,7 +101,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
         ORDER BY expense_date DESC
         LIMIT 1
       ) le ON TRUE
-      WHERE gm.user_id = $2
+      WHERE gm.user_id = $2 OR g.created_by = $2
       ORDER BY g.created_at DESC
     `;
 
@@ -198,13 +228,23 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
     const uid = req.user!.uid;
     const { id } = req.params;
 
-    const memberCheck = await query(
+    let memberCheck = await query(
       'SELECT role FROM public.group_members WHERE group_id = $1 AND user_id = $2',
       [id, uid]
     );
 
     if (memberCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'No tienes acceso a este grupo' });
+      if (isMasterAdmin(req.user)) {
+        memberCheck = { rows: [{ role: 'admin' }], rowCount: 1 };
+      } else {
+        const grpRes = await query('SELECT created_by FROM public.groups WHERE id = $1', [id]);
+        if (grpRes.rows.length > 0 && grpRes.rows[0].created_by === uid) {
+          await query('INSERT INTO public.group_members (group_id, user_id, role) VALUES ($1, $2, $3)', [id, uid, 'admin']);
+          memberCheck = { rows: [{ role: 'admin' }], rowCount: 1 };
+        } else {
+          return res.status(403).json({ error: 'No tienes acceso a este grupo' });
+        }
+      }
     }
 
     const groupRes = await query('SELECT * FROM public.groups WHERE id = $1', [id]);
@@ -381,11 +421,8 @@ router.get('/:id/balances', async (req: AuthenticatedRequest, res: Response) => 
     const uid = req.user!.uid;
     const { id } = req.params;
 
-    const memberCheck = await query(
-      'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
-      [id, uid]
-    );
-    if (memberCheck.rows.length === 0) {
+    const hasAccess = await checkOrGrantGroupAccess(id, req.user);
+    if (!hasAccess) {
       return res.status(403).json({ error: 'No tienes acceso a los balances de este grupo' });
     }
 
@@ -414,11 +451,8 @@ router.post('/:id/simplify-debts', async (req: AuthenticatedRequest, res: Respon
     const uid = req.user!.uid;
     const { id } = req.params;
 
-    const memberCheck = await query(
-      'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
-      [id, uid]
-    );
-    if (memberCheck.rows.length === 0) {
+    const hasAccess = await checkOrGrantGroupAccess(id, req.user);
+    if (!hasAccess) {
       return res.status(403).json({ error: 'No tienes acceso a este grupo' });
     }
 
@@ -476,11 +510,8 @@ router.get('/:id/members', async (req: AuthenticatedRequest, res: Response) => {
     const uid = req.user!.uid;
     const { id } = req.params;
 
-    const memberCheck = await query(
-      'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
-      [id, uid]
-    );
-    if (memberCheck.rows.length === 0) {
+    const hasAccess = await checkOrGrantGroupAccess(id, req.user);
+    if (!hasAccess) {
       return res.status(403).json({ error: 'No perteneces a este grupo' });
     }
 
@@ -806,11 +837,8 @@ router.get('/:id/expenses', async (req: AuthenticatedRequest, res: Response) => 
     const uid = req.user!.uid;
     const { id } = req.params;
 
-    const memberCheck = await query(
-      'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
-      [id, uid]
-    );
-    if (memberCheck.rows.length === 0) {
+    const hasAccess = await checkOrGrantGroupAccess(id, req.user);
+    if (!hasAccess) {
       return res.status(403).json({ error: 'No perteneces a este grupo' });
     }
 
@@ -830,6 +858,88 @@ router.get('/:id/expenses', async (req: AuthenticatedRequest, res: Response) => 
   } catch (error: any) {
     console.error('[API Group Expenses Error]:', error);
     return res.status(500).json({ error: 'Error al obtener gastos del grupo', message: error.message });
+  }
+});
+
+/**
+ * POST /api/groups/join
+ * Permite a un usuario vincularse a un grupo mediante su código de invitación o token
+ */
+router.post('/join', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const uid = req.user!.uid;
+    const { code, token, groupId } = req.body;
+    const inviteKey = (code || token || '').trim().toUpperCase();
+
+    if (!inviteKey) {
+      return res.status(400).json({ error: 'Debes proporcionar un código o enlace válido' });
+    }
+
+    // Buscar la invitación por token o formato de código
+    let invRes = await query(
+      'SELECT * FROM public.group_invitations WHERE UPPER(token) = $1',
+      [inviteKey]
+    );
+
+    if (invRes.rows.length === 0 && groupId) {
+      invRes = await query(
+        'SELECT * FROM public.group_invitations WHERE group_id = $1 AND (UPPER(id) LIKE $2 OR UPPER(token) = $3)',
+        [groupId, `%${inviteKey}%`, inviteKey]
+      );
+    }
+
+    if (invRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Código de invitación inválido o no encontrado' });
+    }
+
+    const invitation = invRes.rows[0];
+
+    // Verificar si ya es miembro
+    const existingMemberCheck = await query(
+      'SELECT id FROM public.group_members WHERE group_id = $1 AND user_id = $2',
+      [invitation.group_id, uid]
+    );
+
+    if (existingMemberCheck.rows.length > 0) {
+      return res.json({
+        success: true,
+        already_member: true,
+        message: 'Ya eres miembro de este grupo',
+        group_id: invitation.group_id,
+      });
+    }
+
+    // Insertar como miembro
+    await query(
+      `INSERT INTO public.group_members (group_id, user_id, role)
+       VALUES ($1, $2, $3)`,
+      [invitation.group_id, uid, invitation.role || 'member']
+    );
+
+    // Actualizar estado de invitación
+    await query(
+      'UPDATE public.group_invitations SET status = $1 WHERE id = $2',
+      ['accepted', invitation.id]
+    );
+
+    // Emitir evento en tiempo real
+    emitRealtimeEvent(
+      {
+        type: 'members_changed',
+        group_id: invitation.group_id,
+        actor_uid: uid,
+      },
+      req.headers.authorization
+    ).catch((e) => console.warn('[Realtime Event Join Error]:', e));
+
+    return res.json({
+      success: true,
+      message: 'Te has unido al grupo exitosamente',
+      group_id: invitation.group_id,
+    });
+  } catch (error: any) {
+    console.error('[API Join Group Error]:', error);
+    return res.status(500).json({ error: 'Error al unirse al grupo', message: error.message });
   }
 });
 

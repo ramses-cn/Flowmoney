@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
 import { requireFirebaseAuth, AuthenticatedRequest } from '../middleware/auth.middleware.ts';
+import { isMasterAdmin } from '../middleware/admin.middleware.ts';
 import { query, getDbPool } from '../db/cloudsql.ts';
 import { emitRealtimeEvent } from '../lib/realtime-events.ts';
 import { scanReceiptWithGemini } from '../gemini.ts';
@@ -720,18 +721,32 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
     let finalGroupId = group_id || null;
     let enforcedCurrency = currency;
     if (finalGroupId) {
-      // Control de seguridad IDOR: verificar que el usuario pertenece al grupo
+      // Control de seguridad IDOR y membresía: verificar acceso al grupo
       const memberCheck = await query(
         'SELECT 1 FROM public.group_members WHERE group_id = $1 AND user_id = $2',
         [finalGroupId, uid]
       );
-      if (memberCheck.rows.length === 0) {
-        return res.status(403).json({ error: 'No perteneces al grupo especificado' });
-      }
-
-      const groupRes = await query('SELECT currency FROM public.groups WHERE id = $1', [finalGroupId]);
-      if (groupRes.rows.length > 0 && groupRes.rows[0].currency) {
-        enforcedCurrency = groupRes.rows[0].currency;
+      if (memberCheck.rows.length === 0 && !isMasterAdmin(req.user)) {
+        // En lugar de rechazar con 403 (el registro de datos no debe ser limitante):
+        // Si el grupo existe, auto-asociar membresía al usuario; si no existe, registrar como gasto independiente
+        const groupExists = await query('SELECT id, currency FROM public.groups WHERE id = $1', [finalGroupId]);
+        if (groupExists.rows.length > 0) {
+          await query(
+            'INSERT INTO public.group_members (group_id, user_id, role) VALUES ($1, $2, $3)',
+            [finalGroupId, uid, 'member']
+          );
+          if (groupExists.rows[0].currency) {
+            enforcedCurrency = groupExists.rows[0].currency;
+          }
+        } else {
+          // El grupo ya no existe; asociar como gasto sin grupo para no perder el registro
+          finalGroupId = null;
+        }
+      } else {
+        const groupRes = await query('SELECT currency FROM public.groups WHERE id = $1', [finalGroupId]);
+        if (groupRes.rows.length > 0 && groupRes.rows[0].currency) {
+          enforcedCurrency = groupRes.rows[0].currency;
+        }
       }
     } else if (lens === 'couple') {
       const coupleRes = await query(
@@ -746,14 +761,20 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
       }
     }
 
-    // Control de seguridad: si se especifica cuenta bancaria, verificar que pertenezca al usuario
-    if (account_id) {
-      const accCheck = await query(
-        'SELECT 1 FROM public.accounts WHERE id = $1 AND user_id = $2',
-        [account_id, uid]
-      );
-      if (accCheck.rows.length === 0) {
-        return res.status(403).json({ error: 'La cuenta bancaria especificada no pertenece al usuario' });
+    // Si se especifica cuenta bancaria, verificar que pertenezca al usuario; si no pertenece o no existe, asociar como gasto libre (el registro de datos no debe ser limitante)
+    let validatedAccountId: string | null = account_id && typeof account_id === 'string' && account_id.trim() && account_id !== 'none' ? account_id.trim() : null;
+    if (validatedAccountId) {
+      try {
+        const accCheck = await query(
+          'SELECT 1 FROM public.accounts WHERE id = $1 AND user_id = $2',
+          [validatedAccountId, uid]
+        );
+        if (accCheck.rows.length === 0) {
+          // No bloquear ni limitar el registro de gastos: continuar con cuenta no asignada (gasto libre/efectivo)
+          validatedAccountId = null;
+        }
+      } catch {
+        validatedAccountId = null;
       }
     }
 
@@ -778,7 +799,7 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
           uid,
           payer,
           finalGroupId,
-          account_id || null,
+          validatedAccountId,
           category_id || null,
           numAmount,
           enforcedCurrency,
@@ -812,13 +833,13 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         }
 
         // 3. Descontar saldo de la cuenta de origen si el pagador es el usuario
-        if (account_id && payer === uid) {
+        if (validatedAccountId && payer === uid) {
           await client.query(
             `UPDATE public.accounts
              SET current_balance = current_balance - $1,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = $2 AND user_id = $3`,
-            [numAmount, account_id, uid]
+            [numAmount, validatedAccountId, uid]
           );
         }
 
@@ -875,7 +896,7 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
           uid,
           payer,
           finalGroupId,
-          account_id || null,
+          validatedAccountId,
           category_id || null,
           numAmount,
           enforcedCurrency,
@@ -924,10 +945,10 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
       }
 
       // Actualizar balance de cuenta en memoria si corresponde
-      if (account_id && payer === uid) {
+      if (validatedAccountId && payer === uid) {
         await query(
           'UPDATE public.accounts SET current_balance = current_balance - $1 WHERE id = $2 AND user_id = $3',
-          [numAmount, account_id, uid]
+          [numAmount, validatedAccountId, uid]
         );
       }
 
@@ -1015,17 +1036,21 @@ router.put('/:id', async (req: AuthenticatedRequest, res: Response) => {
     const oldAmount = Number(existingExpense.amount || 0);
     const newAmount = amount !== undefined ? Number(amount) : oldAmount;
     const oldAccountId = existingExpense.account_id;
-    const newAccountId = account_id !== undefined ? account_id : oldAccountId;
+    let newAccountId = account_id !== undefined ? (account_id && account_id !== 'none' ? account_id : null) : oldAccountId;
     const oldPaidBy = existingExpense.paid_by;
 
-    // Control de seguridad: validar titularidad de la cuenta si fue modificada
+    // Si la cuenta fue modificada, verificar pertenencia; si no pertenece, continuar sin cuenta asignada
     if (newAccountId && newAccountId !== oldAccountId) {
-      const accCheck = await query(
-        'SELECT 1 FROM public.accounts WHERE id = $1 AND user_id = $2',
-        [newAccountId, uid]
-      );
-      if (accCheck.rows.length === 0) {
-        return res.status(403).json({ error: 'La cuenta bancaria seleccionada no pertenece al usuario' });
+      try {
+        const accCheck = await query(
+          'SELECT 1 FROM public.accounts WHERE id = $1 AND user_id = $2',
+          [newAccountId, uid]
+        );
+        if (accCheck.rows.length === 0) {
+          newAccountId = null;
+        }
+      } catch {
+        newAccountId = null;
       }
     }
 

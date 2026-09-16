@@ -23,7 +23,7 @@ import { QuickToolHubModal } from './QuickToolHubModal.tsx';
 import { Plus, Check, RefreshCw, AlertCircle } from 'lucide-react';
 import { useRealtimeSync } from '../../hooks/useRealtimeSync.ts';
 import { DEFAULT_CURRENCY } from '../../constants/currencies.ts';
-import { fetchWithAuth } from '../../utils/apiClient.ts';
+import { fetchWithAuth, safeFetchJson } from '../../utils/apiClient.ts';
 
 interface HomeViewProps {
   onOpenAddModal?: () => void;
@@ -226,60 +226,46 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenAddModal, onNavigateTo
 
       const personalUrl = `/api/dashboard/personal?${params.toString()}`;
 
-      // 1. CARGA CRÍTICA INMEDIATA: Métricas del lente actual y alertas con fetchWithAuth
-      const criticalPromises: Promise<Response>[] = [
-        fetchWithAuth('/api/dashboard/alerts'),
-        fetchWithAuth(personalUrl),
-      ];
+      // 1. CARGA CRÍTICA INMEDIATA con safeFetchJson y tolerancia a fallos
+      const [alertsData, pData] = await Promise.all([
+        safeFetchJson<{ alerts?: SmartAlert[] }>('/api/dashboard/alerts').catch((err) => {
+          console.warn('[HomeView] Alertas no disponibles temporalmente:', err);
+          return { alerts: [] };
+        }),
+        safeFetchJson<DashboardPersonalData>(personalUrl).catch((err) => {
+          console.warn('[HomeView] Datos personales no disponibles temporalmente:', err);
+          return null;
+        }),
+      ]);
 
-      // Si el usuario ya está viendo pareja o grupos, o se solicita carga secundaria, los incluimos
+      if (alertsData?.alerts) {
+        setAlerts(alertsData.alerts);
+      }
+      if (pData) {
+        setPersonalData(pData);
+      }
+
+      // 2. Carga diferida y no bloqueante de lentes secundarios
       const shouldLoadCouple = loadSecondary || currentLens === 'couple';
       const shouldLoadGroups = loadSecondary || currentLens === 'group';
 
       if (shouldLoadCouple) {
-        criticalPromises.push(fetchWithAuth('/api/dashboard/couple'));
+        safeFetchJson<DashboardCoupleData>('/api/dashboard/couple')
+          .then((data) => {
+            if (data) setCoupleData(data);
+          })
+          .catch((err) => console.warn('[HomeView] Datos de pareja diferidos:', err));
       }
+
       if (shouldLoadGroups) {
-        criticalPromises.push(fetchWithAuth('/api/dashboard/groups'));
-      }
-
-      const results = await Promise.all(criticalPromises);
-
-      // Si después del intento y refresco automático forzado persiste algún 401
-      if (results.some((r) => r.status === 401)) {
-        setSessionExpiredMessage('Tu sesión expiró, vuelve a iniciar sesión');
-        return;
-      }
-
-      const alertsRes = results[0];
-      const personalRes = results[1];
-
-      if (alertsRes && alertsRes.ok) {
-        const data = await alertsRes.json();
-        setAlerts(data.alerts || []);
-      }
-      if (personalRes && personalRes.ok) {
-        const data = await personalRes.json();
-        setPersonalData(data);
-      }
-
-      let resIdx = 2;
-      if (shouldLoadCouple) {
-        const coupleRes = results[resIdx++];
-        if (coupleRes && coupleRes.ok) {
-          const data = await coupleRes.json();
-          setCoupleData(data);
-        }
-      }
-      if (shouldLoadGroups) {
-        const groupsRes = results[resIdx++];
-        if (groupsRes && groupsRes.ok) {
-          const data = await groupsRes.json();
-          setGroupsData(data);
-        }
+        safeFetchJson<DashboardGroupsData>('/api/dashboard/groups')
+          .then((data) => {
+            if (data) setGroupsData(data);
+          })
+          .catch((err) => console.warn('[HomeView] Datos de grupos diferidos:', err));
       }
     } catch (error) {
-      console.error('[Dashboard Fetch Error]:', error);
+      console.warn('[Dashboard Fetch Warning]:', error);
     } finally {
       setIsLoading(false);
     }
@@ -304,19 +290,21 @@ export const HomeView: React.FC<HomeViewProps> = ({ onOpenAddModal, onNavigateTo
 
   useEffect(() => {
     const handleSync = () => {
-      fetchDashboardData();
+      fetchDashboardData(true);
     };
     window.addEventListener('flowmoney_data_changed', handleSync);
+    window.addEventListener('group_created', handleSync);
     window.addEventListener('expense_updated', handleSync);
     window.addEventListener('expense_deleted', handleSync);
     window.addEventListener('expense_created', handleSync);
     return () => {
       window.removeEventListener('flowmoney_data_changed', handleSync);
+      window.removeEventListener('group_created', handleSync);
       window.removeEventListener('expense_updated', handleSync);
       window.removeEventListener('expense_deleted', handleSync);
       window.removeEventListener('expense_created', handleSync);
     };
-  }, [token, period, customStart, customEnd, filters]);
+  }, [token, period, customStart, customEnd, filters, currentLens]);
 
   const activeGroupIds = useMemo(() => {
     if (currentLens === 'couple') {
